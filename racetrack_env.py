@@ -77,12 +77,27 @@ class RaceTrackEnv:
         
         # Determine acceleration limits based on Track vs Grass
         if current_tile == 'G':
-            # Grass deceleration logic
-            min_ax = -1 if vx >= 1 else -1
-            max_ax = -1 if vx >= 2 else (0 if vx == 1 else 1)
-            
-            min_ay = -1 if vy >= 1 else -1
-            max_ay = -1 if vy >= 2 else (0 if vy == 1 else 1)
+            if vx >= 2:
+                min_ax, max_ax = -1, -1
+            elif vx <= -2:
+                min_ax, max_ax = 1, 1
+            elif vx == 1:
+                min_ax, max_ax = -1, 0
+            elif vx == -1:
+                min_ax, max_ax = 0, 1
+            else:
+                min_ax, max_ax = -1, 1
+
+            if vy >= 2:
+                min_ay, max_ay = -1, -1
+            elif vy <= -2:
+                min_ay, max_ay = 1, 1
+            elif vy == 1:
+                min_ay, max_ay = -1, 0
+            elif vy == -1:
+                min_ay, max_ay = 0, 1
+            else:
+                min_ay, max_ay = -1, 1
         else:
             # Normal Track/Start limits
             min_ax, max_ax = -1, 1
