@@ -1,124 +1,143 @@
+import os
 import math
 
 class RaceTrackEnv:
-    def __init__(self, track_string: str):
-        """
-        Parse the character-based matrix text file.
-        Coordinates: x = column index, y = row index (0,0 is top-left).
-        """
-        self.grid = [list(line.strip()) for line in track_string.strip().split('\n') if line.strip()]
-        self.height = len(self.grid)
-        self.width = len(self.grid[0]) if self.height > 0 else 0
-        
-        self.starts = []
-        self.finishes = []
-        
-        # Pre-map coordinates for rapid lookup
-        for y in range(self.height):
-            for x in range(self.width):
-                char = self.grid[y][x]
-                if char == 'S':
-                    self.starts.append((x, y))
-                elif char == 'F':
-                    self.finishes.append((x, y))
-
-    def get_tile(self, x: int, y: int) -> str:
-        """Returns the tile type at (x, y). Out of bounds counts as an Obstacle (crash)."""
-        if 0 <= x < self.width and 0 <= y < self.height:
-            return self.grid[y][x]
-        return 'O'  # Out of bounds treated as Obstacle
-
-    def intersects_obstacle(self, x1: int, y1: int, x2: int, y2: int) -> bool:
-        """
-        Line-segment intersection using grid traversal.
-        Checks if the line from center (x1, y1) to center (x2, y2) crosses any 'O'.
-        """
-        # Quick check for endpoints
-        if self.get_tile(x1, y1) == 'O' or self.get_tile(x2, y2) == 'O':
-            return True
-        if x1 == x2 and y1 == y2:
-            return False
-
-        # Ray-casting parameters matching the cell boundaries (shifted by 0.5)
-        x, y = x1, y1
-        dx = x2 - x1
-        dy = y2 - y1
-        
-        step_x = 1 if dx > 0 else -1 if dx < 0 else 0
-        step_y = 1 if dy > 0 else -1 if dy < 0 else 0
-        
-        # Distance to next cell boundary
-        t_max_x = (x + 0.5 * step_x - x1) / dx if dx != 0 else float('inf')
-        t_max_y = (y + 0.5 * step_y - y1) / dy if dy != 0 else float('inf')
-        
-        t_delta_x = abs(1 / dx) if dx != 0 else float('inf')
-        t_delta_y = abs(1 / dy) if dy != 0 else float('inf')
-        
-        while (x != x2) or (y != y2):
-            if t_max_x < t_max_y:
-                t_max_x += t_delta_x
-                x += step_x
-            else:
-                t_max_y += t_delta_y
-                y += step_y
-                
-            if self.get_tile(x, y) == 'O':
-                return True
-        return False
-
-    def get_valid_next_states(self, current_pos: tuple, current_vel: tuple) -> list:
-        """
-        Step 2: Physics Engine & Rule Validator.
-        Returns a list of valid tuples: ((next_x, next_y), (next_vx, next_vy))
-        """
-        x_prime, y_prime = current_pos
-        vx, vy = current_vel
-        current_tile = self.get_tile(x_prime, y_prime)
-        
-        # Determine acceleration limits based on Track vs Grass
-        if current_tile == 'G':
-            # Grass deceleration logic
-            min_ax = -1 if vx >= 1 else -1
-            max_ax = -1 if vx >= 2 else (0 if vx == 1 else 1)
-            
-            min_ay = -1 if vy >= 1 else -1
-            max_ay = -1 if vy >= 2 else (0 if vy == 1 else 1)
-        else:
-            # Normal Track/Start limits
-            min_ax, max_ax = -1, 1
-            min_ay, max_ay = -1, 1
-
-        valid_moves = []
-        
-        # Evaluate all available acceleration vector changes
-        for ax in range(min_ax, max_ax + 1):
-            for ay in range(min_ay, max_ay + 1):
-                next_vx = vx + ax
-                next_vy = vy + ay
-                next_x = x_prime + next_vx
-                next_y = y_prime + next_vy
-                
-                # Verify that this movement doesn't cause a crash
-                if not self.intersects_obstacle(x_prime, y_prime, next_x, next_y):
-                    valid_moves.append(((next_x, next_y), (next_vx, next_vy)))
-                    
-        return valid_moves
-
-# Verification Example 
-if __name__ == "__main__":
-    track_layout = """
-    OOOOOOOOOO
-    OSSSSSTTTO
-    OTTTTTTTFO
-    OTTTGGGTFO
-    OOOOOOOOOO
-    """
-    env = RaceTrackEnv(track_layout)
-    print(f"Track Loaded: Width={env.width}, Height={env.height}")
-    print(f"Start coordinates: {env.starts}")
+    # --- DIAGNOSTIC CONFIGURATION SWITCHES ---
+    INVERT_Y = True          # True: Cartesian (Y=0 at bottom). False: Matrix (Y=0 at top row).
+    V_FIRST_UPDATE = True    # True: v = v + a, x = x + v. False: x = x + v, v = v + a.
+    GRID_CENTER_ROUND = True # True: round(x) tile matching. False: int(floor(x)) cell matching.
     
-    # Simulate a car at (1, 1) [Start] with velocity (0,0)
-    print("Valid next moves from Start (0,0 velocity):")
-    moves = env.get_valid_next_states((1, 1), (0, 0))
-    for pos, vel in moves:
-        print(f"  -> Pos: {pos}, New Vel: {vel}")
+    # 
+    MAX_SPEED = 4            # Set to an integer (e.g., 4) to limit top speed, or None for unlimited.
+
+    def __init__(self, track_file):
+        if not os.path.exists(track_file):
+            raise FileNotFoundError(f"Track file not found: {track_file}")
+            
+        with open(track_file, 'r') as f:
+            raw_lines = [line.replace('\n', '').replace('\r', '') for line in f]
+        
+        raw_lines = [line for line in raw_lines if len(line) > 0]
+        
+        self.height = len(raw_lines)
+        self.width = len(raw_lines[0]) if self.height > 0 else 0
+        
+        self.obstacles = set()
+        self.grass = set()
+        self.tracks = set()
+        self.finish_positions = set()
+        self.start_positions = []
+        
+        has_explicit_track = any('T' in line for line in raw_lines)
+        
+        for r in range(self.height):
+            y = (self.height - 1) - r if self.INVERT_Y else r
+            for x in range(self.width):
+                char = raw_lines[r][x]
+                if char == 'G': 
+                    self.grass.add((x, y))
+                elif char == 'F': 
+                    self.finish_positions.add((x, y))
+                elif char == 'S': 
+                    self.start_positions.append((x, y))
+                    self.tracks.add((x, y))
+                elif char == 'T': 
+                    self.tracks.add((x, y))
+                elif char in ['O', 'X', '#']:
+                    self.obstacles.add((x, y))
+                elif char in ['.', ' ']:
+                    if has_explicit_track:
+                        self.obstacles.add((x, y))
+                    else:
+                        self.tracks.add((x, y))
+                else:
+                    self.obstacles.add((x, y))
+                    
+        if not self.start_positions: raise ValueError("No start position 'S' found.")
+        if not self.finish_positions: raise ValueError("No finish line 'F' found.")
+        self.start_pos = self.start_positions[0]
+
+    def get_valid_accelerations(self, x, y, vx, vy):
+        valid_ax, valid_ay = [-1, 0, 1], [-1, 0, 1]
+        
+        # Handle grass speed constraints
+        if (x, y) in self.grass:
+            if vx >= 2: valid_ax = [-1]
+            elif vx == 1: valid_ax = [-1, 0]
+            elif vx <= -2: valid_ax = [1]
+            elif vx == -1: valid_ax = [0, 1]
+            if vy >= 2: valid_ay = [-1]
+            elif vy == 1: valid_ay = [-1, 0]
+            elif vy <= -2: valid_ay = [1]
+            elif vy == -1: valid_ay = [0, 1]
+            return valid_ax, valid_ay
+
+        # Global Speed Limit Enforcer
+        if self.MAX_SPEED is not None:
+            valid_ax = [ax for ax in valid_ax if abs(vx + ax) <= self.MAX_SPEED]
+            valid_ay = [ay for ay in valid_ay if abs(vy + ay) <= self.MAX_SPEED]
+            
+        return valid_ax, valid_ay
+
+    def is_valid_move(self, x, y, vx, vy, ax, ay):
+        v_ax, v_ay = self.get_valid_accelerations(x, y, vx, vy)
+        if ax not in v_ax or ay not in v_ay:
+            return x, y, vx, vy, False
+            
+        if self.V_FIRST_UPDATE:
+            nvx, nvy = vx + ax, vy + ay
+            nx, ny = x + nvx, y + nvy
+        else:
+            nx, ny = x + vx, y + vy
+            nvx, nvy = vx + ax, vy + ay
+        
+        if not (0 <= nx < self.width and 0 <= ny < self.height):
+            return x, y, vx, vy, False
+            
+        # Continuous Collision Detection
+        x1, y1 = float(x), float(y)
+        x2, y2 = float(nx), float(ny)
+        dx, dy = x2 - x1, y2 - y1
+        
+        bx_start = max(0, min(int(x1), int(x2)) - 1)
+        bx_end = min(self.width - 1, max(int(x1), int(x2)) + 1)
+        by_start = max(0, min(int(y1), int(y2)) - 1)
+        by_end = min(self.height - 1, max(int(y1), int(y2)) + 1)
+        
+        for cx in range(bx_start, bx_end + 1):
+            for cy in range(by_start, by_end + 1):
+                if (cx, cy) in self.obstacles:
+                    if self.GRID_CENTER_ROUND:
+                        xmin, xmax = cx - 0.5, cx + 0.5
+                        ymin, ymax = cy - 0.5, cy + 0.5
+                    else:
+                        xmin, xmax = float(cx), float(cx + 1)
+                        ymin, ymax = float(cy), float(cy + 1)
+                        
+                    t_min, t_max = 0.0, 1.0
+                    possible_hit = True
+                    
+                    if abs(dx) < 1e-9:
+                        if x1 < xmin or x1 > xmax: possible_hit = False
+                    else:
+                        t1 = (xmin - x1) / dx
+                        t2 = (xmax - x1) / dx
+                        t_min = max(t_min, min(t1, t2))
+                        t_max = min(t_max, max(t1, t2))
+                        
+                    if possible_hit:
+                        if abs(dy) < 1e-9:
+                            if y1 < ymin or y1 > ymax: possible_hit = False
+                        else:
+                            t1 = (ymin - y1) / dy
+                            t2 = (ymax - y1) / dy
+                            t_min = max(t_min, min(t1, t2))
+                            t_max = min(t_max, max(t1, t2))
+                            
+                    if possible_hit and (t_min <= t_max + 1e-9):
+                        return x, y, vx, vy, False
+                        
+        return nx, ny, nvx, nvy, True
+
+    def is_finish(self, x, y):
+        return (x, y) in self.finish_positions

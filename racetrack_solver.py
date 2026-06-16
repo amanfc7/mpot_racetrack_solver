@@ -1,199 +1,139 @@
-import math
+import heapq
 import random
-import time
+import math
+from collections import deque
 
-class RaceTrackEnv:
-    def __init__(self, track_string: str):
-        """ Parse the character-based matrix text file."""
-        self.grid = [list(line.strip()) for line in track_string.strip().split('\n') if line.strip()]
-        self.height = len(self.grid)
-        self.width = len(self.grid[0]) if self.height > 0 else 0
-        
-        self.starts = []
-        self.finishes = []
-        
-        for y in range(self.height):
-            for x in range(self.width):
-                char = self.grid[y][x]
-                if char == 'S':
-                    self.starts.append((x, y))
-                elif char == 'F':
-                    self.finishes.append((x, y))
-
-    def get_tile(self, x: int, y: int) -> str:
-        if 0 <= x < self.width and 0 <= y < self.height:
-            return self.grid[y][x]
-        return 'O'
-
-    def intersects_obstacle(self, x1: int, y1: int, x2: int, y2: int) -> bool:
-        """ line-segment intersection using grid traversal."""
-        if self.get_tile(x1, y1) == 'O' or self.get_tile(x2, y2) == 'O':
-            return True
-        if x1 == x2 and y1 == y2:
-            return False
-
-        x, y = x1, y1
-        dx = x2 - x1
-        dy = y2 - y1
-        
-        step_x = 1 if dx > 0 else -1 if dx < 0 else 0
-        step_y = 1 if dy > 0 else -1 if dy < 0 else 0
-        
-        t_max_x = (x + 0.5 * step_x - x1) / dx if dx != 0 else float('inf')
-        t_max_y = (y + 0.5 * step_y - y1) / dy if dy != 0 else float('inf')
-        
-        t_delta_x = abs(1 / dx) if dx != 0 else float('inf')
-        t_delta_y = abs(1 / dy) if dy != 0 else float('inf')
-        
-        while (x != x2) or (y != y2):
-            if t_max_x < t_max_y:
-                t_max_x += t_delta_x
-                x += step_x
-            else:
-                t_max_y += t_delta_y
-                y += step_y
-                
-            if self.get_tile(x, y) == 'O':
-                return True
-        return False
-
-    def get_valid_next_states(self, current_pos: tuple, current_vel: tuple) -> list:
-        x_prime, y_prime = current_pos
-        vx, vy = current_vel
-        current_tile = self.get_tile(x_prime, y_prime)
-        
-        if current_tile == 'G':
-            min_ax = -1 if vx >= 1 else -1
-            max_ax = -1 if vx >= 2 else (0 if vx == 1 else 1)
-            min_ay = -1 if vy >= 1 else -1
-            max_ay = -1 if vy >= 2 else (0 if vy == 1 else 1)
-        else:
-            min_ax, max_ax = -1, 1
-            min_ay, max_ay = -1, 1
-
-        valid_moves = []
-        for ax in range(min_ax, max_ax + 1):
-            for ay in range(min_ay, max_ay + 1):
-                next_vx = vx + ax
-                next_vy = vy + ay
-                next_x = x_prime + next_vx
-                next_y = y_prime + next_vy
-                
-                if not self.intersects_obstacle(x_prime, y_prime, next_x, next_y):
-                    valid_moves.append(((next_x, next_y), (next_vx, next_vy)))
-                    
-        return valid_moves
-
-class RaceTrackSolver:
+class SALNSSolver:
     def __init__(self, env):
         self.env = env
-        avg_fx = sum(x for x, y in env.finishes) / len(env.finishes)
-        avg_fy = sum(y for x, y in env.finishes) / len(env.finishes)
-        self.target = (avg_fx, avg_fy)
+        self.distance_field = self._generate_distance_field()
 
-    def heuristic_distance(self, pos):
-        return math.sqrt((pos[0] - self.target[0])**2 + (pos[1] - self.target[1])**2)
+    def _generate_distance_field(self):
+        distance_field = {}
+        queue = deque()
+        for (fx, fy) in self.env.finish_positions:
+            queue.append((fx, fy, 0))
+            distance_field[(fx, fy)] = 0
+        while queue:
+            x, y, dist = queue.popleft()
+            # 4-Connectivity prevents the heuristic leaking diagonally across wall corners
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.env.width and 0 <= ny < self.env.height:
+                    if (nx, ny) not in self.env.obstacles and (nx, ny) not in distance_field:
+                        distance_field[(nx, ny)] = dist + 1
+                        queue.append((nx, ny, dist + 1))
+        return distance_field
 
-    def generate_randomized_greedy_path(self, max_steps=150):
-        current_pos = random.choice(self.env.starts)
-        current_vel = (0, 0)
-        path = [current_pos]
+    def _heuristic(self, x, y):
+        return self.distance_field.get((x, y), 999999)
+
+    def solve(self, iterations=150, initial_temp=15.0, cooling_rate=0.995):
+        print("  Generating robust global baseline trajectory...")
+        best_path = self._get_initial_solution()
         
-        for _ in range(max_steps):
-            if self.env.get_tile(current_pos[0], current_pos[1]) == 'F':
-                return path
-
-            valid_moves = self.env.get_valid_next_states(current_pos, current_vel)
-            if not valid_moves:
-                return None 
-
-            # Sort by distance to finish line
-            valid_moves.sort(key=lambda m: self.heuristic_distance(m[0]))
+        if not best_path:
+            return None
             
-            # GRASP Metaheuristic element: 85% greedy exploitation, 15% exploration
-            if len(valid_moves) > 1 and random.random() < 0.15:
-                chosen_move = random.choice(valid_moves[:3]) 
+        print(f"  Baseline found: {len(best_path)} steps. Initializing Simulated Annealing loop...")
+        current_path = list(best_path)
+        T = initial_temp
+        
+        for i in range(iterations):
+            if len(current_path) < 6: break
+                
+            if random.random() < 0.6 and len(current_path) > 10:
+                candidates = []
+                for _ in range(5):
+                    s_idx = random.randint(0, len(current_path) - 6)
+                    g = random.randint(3, min(12, len(current_path) - s_idx - 1))
+                    window = current_path[s_idx : s_idx + g + 1]
+                    avg_speed = sum(abs(v[2]) + abs(v[3]) for v in window) / len(window)
+                    candidates.append((avg_speed, s_idx, g))
+                candidates.sort(key=lambda item: item[0])
+                _, start_idx, gap = candidates[0]
             else:
-                chosen_move = valid_moves[0]
+                start_idx = random.randint(0, len(current_path) - 4)
+                gap = random.randint(2, min(8, len(current_path) - start_idx - 1))
+            
+            end_idx = start_idx + gap
+            start_state = current_path[start_idx]
+            target_state = current_path[end_idx]
+            
+            repaired_segment = self._repair(start_state, target_state, gap)
+            
+            if repaired_segment is not None:
+                new_path = current_path[:start_idx + 1] + repaired_segment + current_path[end_idx + 1:]
+                delta = len(new_path) - len(current_path)
+                
+                if delta < 0:
+                    current_path = new_path
+                    if len(current_path) < len(best_path):
+                        best_path = current_path
+                        print(f"    [Iteration {i+1}] SA Shortcut found! Path optimized to {len(best_path)} moves.")
+                elif delta == 0:
+                    current_path = new_path
+                else:
+                    prob = math.exp(-delta / T)
+                    if random.random() < prob:
+                        current_path = new_path
+            
+            T *= cooling_rate
+            if T < 0.01: T = 0.01
+                    
+        return best_path
 
-            current_pos = chosen_move[0]
-            current_vel = chosen_move[1]
-            path.append(current_pos)
-
+    def _get_initial_solution(self):
+        start_state = (self.env.start_pos[0], self.env.start_pos[1], 0, 0)
+        h = self._heuristic(start_state[0], start_state[1])
+        count = 0
+        queue = [(1.0 * h, 0, 0, count, start_state, [start_state])]
+        visited = {start_state: 0}
+        
+        while queue:
+            _, cost, _, _, current, path = heapq.heappop(queue)
+            x, y, vx, vy = current
+            if self.env.is_finish(x, y): return path
+            if cost > visited.get(current, float('inf')): continue
+                
+            v_ax, v_ay = self.env.get_valid_accelerations(x, y, vx, vy)
+            for ax in v_ax:
+                for ay in v_ay:
+                    nx, ny, nvx, nvy, valid = self.env.is_valid_move(x, y, vx, vy, ax, ay)
+                    if valid:
+                        next_state = (nx, ny, nvx, nvy)
+                        next_cost = cost + 1
+                        if next_cost < visited.get(next_state, float('inf')):
+                            visited[next_state] = next_cost
+                            next_h = self._heuristic(nx, ny)
+                            speed_bonus = -(abs(nvx) + abs(nvy))
+                            count += 1
+                            heapq.heappush(queue, (next_cost + 1.0 * next_h, next_cost, speed_bonus, count, next_state, path + [next_state]))
         return None
 
-    def solve(self, iterations=2000):
-        print(f"Executing Metaheuristic optimization over {iterations} loops...")
-        start_time = time.time()
+    def _repair(self, start_state, target_state, max_steps):
+        tx, ty, tvx, tvy = target_state
+        init_h = abs(start_state[0] - tx) + abs(start_state[1] - ty) + abs(start_state[2] - tvx) + abs(start_state[3] - tvy)
+        count = 0
+        queue = [(init_h, 0, count, start_state, [])]
+        visited = {start_state: 0}
         
-        best_path = None
-        min_moves = float('inf')
-        successful_runs = []
-
-        for i in range(iterations):
-            path = self.generate_randomized_greedy_path()
-            if path:
-                # Number of moves is path length minus the starting position node
-                score = len(path) - 1
-                successful_runs.append(score)
-                if score < min_moves:
-                    min_moves = score
-                    best_path = path
-                    print(f" -> Iteration {i:4d}: Found faster path! Moves: {min_moves}")
-
-        runtime = time.time() - start_time
-        
-        if successful_runs:
-            avg_moves = sum(successful_runs) / len(successful_runs)
-            variance = sum((x - avg_moves) ** 2 for x in successful_runs) / len(successful_runs)
-            dev = math.sqrt(variance)
-        else:
-            avg_moves, dev = 0, 0
-
-        return {
-            "best_path": best_path,
-            "best_score": min_moves,
-            "avg_score": avg_moves,
-            "std_dev": dev,
-            "runtime": runtime
-        }
-
-def save_path_to_csv(path, filename="tripFile.csv"):
-    if not path:
-        return
-    with open(filename, 'w') as f:
-        for (x, y) in path:
-            f.write(f"{x},{y}\n")
-    print(f"\n[Success] Optimized path exported to: '{filename}'")
-
-# Execution Entry Point 
-    # Sample layout layout containing: Start (S), Track (T), Grass (G), Finish (F)
-    sample_track = """
-    OOOOOOOOOOOOOOOOOOOO
-    OSSSSSSTTTTTTTTTTTFO
-    OTTTTTTTTTGGGGGGTTFO
-    OTTTTTTTTTGGGGGGTTFO
-    OOOOOOOOOOOOOOOOOOOO
-    """
-    
-    # Initialize environment map
-    env = RaceTrackEnv(sample_track)
-    
-    # Run solver
-    solver = RaceTrackSolver(env)
-    results = solver.solve(iterations=3000)
-    
-    # Export metrics for submission & presentation
-    if results["best_path"]:
-        print("\n" + "="*45)
-        print("   Benchmarks:  ")
-        print("="*45)
-        print(f"  Best Solution (Min Moves): {results['best_score']} moves")
-        print(f"  Average Solution Score:    {results['avg_score']:.2f} moves")
-        print(f"  Standard Deviation (Dev):  {results['std_dev']:.2f}")
-        print(f"  Execution Runtime:         {results['runtime']:.4f} seconds")
-        print("="*45)
-        
-        save_path_to_csv(results["best_path"], "tripFile.csv")
-    else:
-        print("\n[Error] The solver failed to reach the finish line. Adjust layout or iterations.")
+        while queue:
+            _, cost, _, current, segment = heapq.heappop(queue)
+            if current == target_state: return segment
+            if cost >= max_steps: continue
+            
+            x, y, vx, vy = current
+            v_ax, v_ay = self.env.get_valid_accelerations(x, y, vx, vy)
+            for ax in v_ax:
+                for ay in v_ay:
+                    nx, ny, nvx, nvy, valid = self.env.is_valid_move(x, y, vx, vy, ax, ay)
+                    if valid:
+                        next_state = (nx, ny, nvx, nvy)
+                        next_cost = cost + 1
+                        if next_cost < visited.get(next_state, float('inf')):
+                            visited[next_state] = next_cost
+                            next_h = abs(nx - tx) + abs(ny - ty) + abs(nvx - tvx) + abs(nvy - tvy)
+                            count += 1
+                            heapq.heappush(queue, (next_cost + next_h, next_cost, count, next_state, segment + [next_state]))
+        return None
