@@ -25,7 +25,7 @@ def process_all_tracks():
         try:
             env = RaceTrackEnv(track_path)
             solver = SALNSSolver(env)
-            final_path = solver.solve(iterations=1000)
+            final_path = solver.solve(iterations=2000)
             
             if final_path:
                 base_name = os.path.splitext(track_filename)[0]
